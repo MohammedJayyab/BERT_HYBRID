@@ -10,7 +10,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from pretty_table import print_formatted_recommendations
 
 class HybridRecommendationSystem:
-    def __init__(self, product_file, transaction_file):
+    def __init__(self, product_file, transaction_file, interaction_weights=None, blend_weights=None):
         # Load data
         self.products_df = pd.read_csv(product_file)
         self.transactions_df = pd.read_csv(transaction_file)
@@ -23,10 +23,21 @@ class HybridRecommendationSystem:
         self.min_max_scaler = MinMaxScaler()
         self.standard_scaler = StandardScaler()
 
+        # Customizable interaction weights for user behavior (clicked, added, purchased)
+        self.interaction_weights = interaction_weights if interaction_weights else {'clicked': 1, 'added': 2, 'purchased': 3}
+        
+        # Hyperparameters to blend collaborative and content-based features
+        self.blend_weights = blend_weights if blend_weights else {'content': 0.5, 'collaborative': 0.5}
+
+        # Weight parameters for interaction weight, content similarity, and collaborative similarity
+        self.w1 = 0.2  # Interaction Weight
+        self.w2 = 0.5  # Content Similarity
+        self.w3 = 0.3  # Collaborative Similarity
+
     def prepare_product_documents(self):
         # Concatenate product name, category, and description
-        self.products_df['document'] = self.products_df['product_name'] + " " + \
-                                       self.products_df['category_name'] + " " + \
+        self.products_df['document'] = self.products_df['category_name'] + " : " + \
+                                       self.products_df['product_name'] + " : " + \
                                        self.products_df['description']
 
     def generate_bert_embeddings(self):
@@ -57,7 +68,7 @@ class HybridRecommendationSystem:
             product_node = f"product_{row['product_id']}"
             interaction_type = row['interaction_type'] if pd.notna(row['interaction_type']) else 'clicked'  # Default to 'clicked' if NaN
             quantity = row.get('quantity', 1)  # Default to 1 if quantity is not present
-            base_weight = {'clicked': 1, 'added': 2, 'purchased': 3}.get(interaction_type, 1)
+            base_weight = self.interaction_weights.get(interaction_type, 1)
             weight = base_weight * np.log(quantity + 1)  # Final weight is based on interaction type and quantity with logarithmic scaling
 
             if user_node not in self.graph:
@@ -67,7 +78,7 @@ class HybridRecommendationSystem:
             self.graph.add_edge(user_node, product_node, weight=weight, interaction=interaction_type, quantity=quantity)
 
     def normalize_edge_weights(self):
-        # Normalize edge weights in the user-product graph to be between 0 and 1 using Min-Max normalization
+        # Normalize edge weights in the user-product graph to be between 0 and 1
         all_weights = [d['weight'] for _, _, d in self.graph.edges(data=True)]
         weights_array = np.array(all_weights).reshape(-1, 1)
         normalized_weights = self.min_max_scaler.fit_transform(weights_array).flatten()
@@ -103,8 +114,9 @@ class HybridRecommendationSystem:
                     content_similarity = self.similarity_matrix[i, j]
                     collaborative_similarity = normalized_collaborative_similarities[idx]
                     idx += 1
-                    # Combine normalized collaborative similarity and content similarity
-                    self.combined_similarity_matrix[i, j] = collaborative_similarity + content_similarity
+                    # Combine normalized collaborative similarity and content similarity using blend weights
+                    self.combined_similarity_matrix[i, j] = (self.blend_weights['collaborative'] * collaborative_similarity +
+                                                             self.blend_weights['content'] * content_similarity)
 
     def get_top_n_similar_products(self, product_id, n=5):
         # Retrieve top-N similar products based on the combined similarity matrix
@@ -119,7 +131,7 @@ class HybridRecommendationSystem:
         return similar_products
 
     def multi_hop_recommendation(self, user_id, hop=2, top_n=5, exclude_purchased=False):
-        # Generate multi-hop recommendations
+        # Generate multi-hop recommendations        
         user_node = f"user_{user_id}"
         
         # Check if the user node exists in the graph
@@ -144,10 +156,14 @@ class HybridRecommendationSystem:
                     interaction_weight = self.graph[user_node][neighbor]['weight']
                     product_index = self.products_df[self.products_df['product_id'] == int(neighbor.split('_')[1])].index[0]
                     content_similarity = self.similarity_matrix[product_index, product_index]
+                    collaborative_similarity = 0  # Since hop is 1, there's no collaborative similarity involved
                     
-                    # Custom scoring function: incorporating interaction weight, content similarity
-                    score = (interaction_weight + content_similarity)
+                    # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
+                    score = (self.w1 * interaction_weight +
+                             self.w2 * content_similarity +
+                             self.w3 * collaborative_similarity)
                     recommendations[neighbor] = score
+                    
             else:
                 # Get second-hop neighbors (products connected to the user's first-hop products)
                 second_hop_neighbors = set(self.graph.neighbors(neighbor))
@@ -161,10 +177,24 @@ class HybridRecommendationSystem:
                                 interaction_weight = self.graph[second_neighbor][product]['weight']
                                 product_index = self.products_df[self.products_df['product_id'] == int(product.split('_')[1])].index[0]
                                 content_similarity = self.similarity_matrix[product_index, product_index]
+                                collaborative_similarity = self.combined_similarity_matrix[product_index, product_index]
                                 
-                                # Custom scoring function: incorporating interaction weight, content similarity
-                                score = (interaction_weight + content_similarity)
+                                # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
+                                score = (self.w1 * interaction_weight +
+                                         self.w2 * content_similarity +
+                                         self.w3 * collaborative_similarity)                                
                                 recommendations[product] = recommendations.get(product, 0) + score
+                                
+                                
+                                
+                                #print(f"Product '{product}' added with score: {score_total}")  # Debugging: Print product and score
+                                # if(product == 'product_6'):
+                                #     #print(f"tt: for product ID 6:-> {tt}")
+                                #     #print(f"Score for product ID 6: {score}")
+                                #     print(f"self.w1 * interaction_weight : {self.w1 * interaction_weight }")
+                                #     print(f"self.w2 * content_similarity : {self.w2 * content_similarity }")
+                                #     print(f"self.w3 * collaborative_similarity : {self.w3 * collaborative_similarity }")
+                                
 
         # If exclude_purchased is True, filter out products the user has already purchased
         if exclude_purchased:
@@ -172,11 +202,13 @@ class HybridRecommendationSystem:
 
         # Sort recommendations by score in descending order and limit to top N
         sorted_recommendations = sorted(recommendations.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        # Assuming sorted_recommendations is the result list
+    
 
-        # Extract category_name for each recommended product
+            
+        # Extract category_name, product_id, product_name, and score for each recommended product
         return [(self.products_df[self.products_df['product_id'] == int(item[0].split('_')[1])]['category_name'].values[0],
                  int(item[0].split('_')[1]),
-                 self.products_df[self.products_df['product_id'] == int(item[0].split('_')[1])]['product_name'].values[0],
                  item[1]) for item in sorted_recommendations]
 
     def run_recommendation_pipeline(self):
@@ -188,13 +220,12 @@ class HybridRecommendationSystem:
         self.normalize_edge_weights()
         self.compute_combined_similarity()
 
-
 # Example Usage
 if __name__ == "__main__":
     recommender = HybridRecommendationSystem('data/products.csv', 'data/transactions.csv')
     recommender.run_recommendation_pipeline()
 
-# Example: Get top 5 similar products for product with ID
+    # Example: Get top 5 similar products for product with ID
     product_id = 1
     print(f"Top 5 similar products for product '{product_id}':")
     similar_products = recommender.get_top_n_similar_products(product_id, n=5)
@@ -206,7 +237,8 @@ if __name__ == "__main__":
     print(f"Top 5 recommendations for user '{customer_id}' with two-hop traversal (excluding purchased):")
     user_recommendations = recommender.multi_hop_recommendation(customer_id, hop=2, top_n=5, exclude_purchased=True)
 
-    # Print the formatted table using the imported function
-    print_formatted_recommendations(user_recommendations, recommender.products_df)
+    # Extract only the relevant three values: category_name, product_id, and score
+    user_recommendations_trimmed = [(category_name, product_id, score) for category_name, product_id, score in user_recommendations]
 
-   
+    # Print the formatted table using the imported function
+    print_formatted_recommendations(user_recommendations_trimmed, recommender.products_df)
