@@ -18,6 +18,7 @@ product_id,product_name,category_id,category_name,brand,price,description
 17,"Patagonia Down Jacket",2,"Clothing","Patagonia",250,"Patagonia’s down jacket provides warmth and lightweight wear for cold conditions."
 18,"The North Face Rain Jacket",2,"Clothing","The North Face",199,"The North Face rain jacket, waterproof and breathable, ideal for outdoor activities."
 19,"Under Armour Sports Tights",2,"Clothing","Under Armour",80,"Under Armour sports tights with a flexible, moisture-wicking fabric."
+190,"Under Armour Sports Adidas Tights ABC",2,"Clothing","Under Armour",80,"Under Armour sports tights with a flexible, moisture-wicking fabric."
 20,"Puma Sweatpants",2,"Clothing","Puma",65,"Puma sweatpants designed for comfort and casual style."
 21,"Dyson V15 Vacuum Cleaner",3,"Home Appliances","Dyson",699,"Dyson V15, the most powerful and intelligent cordless vacuum with laser detection."
 22,"Philips Air Fryer XXL",3,"Home Appliances","Philips",199,"Philips Air Fryer XXL with fat removal technology for healthier frying."

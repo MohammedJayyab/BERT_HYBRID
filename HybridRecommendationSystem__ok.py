@@ -27,11 +27,12 @@ class HybridRecommendationSystem:
         self.interaction_weights = interaction_weights if interaction_weights else {'clicked': 1, 'added': 2, 'purchased': 3}
         
         # Hyperparameters to blend collaborative and content-based features
-        self.blend_weights = blend_weights if blend_weights else {'content': 0.4, 'collaborative': 0.4, 'interaction': 0.2}
+        self.blend_weights = blend_weights if blend_weights else {'content': 0.5, 'collaborative': 0.5}
 
-        # Ensure weights sum up to 1 for proper scaling
-        total_weight = sum(self.blend_weights.values())
-        self.blend_weights = {k: v / total_weight for k, v in self.blend_weights.items()}
+        # Weight parameters for interaction weight, content similarity, and collaborative similarity
+        self.w1 = 0.3  # Interaction Weight
+        self.w2 = 0.3  # Content Similarity
+        self.w3 = 0.4  # Collaborative Similarity
 
     def prepare_product_documents(self):
         # Concatenate product name, category, and description
@@ -102,9 +103,9 @@ class HybridRecommendationSystem:
                     collaborative_similarity = common_users / (len(set(self.graph.neighbors(product_i))) * len(set(self.graph.neighbors(product_j))) + 1e-9)
                     collaborative_similarities.append(collaborative_similarity)
 
-        # Normalize collaborative similarities using Min-Max normalization
+        # Normalize collaborative similarities using Z-score normalization
         collaborative_similarities = np.array(collaborative_similarities).reshape(-1, 1)
-        normalized_collaborative_similarities = self.min_max_scaler.fit_transform(collaborative_similarities).flatten()
+        normalized_collaborative_similarities = self.standard_scaler.fit_transform(collaborative_similarities).flatten()
         
         idx = 0
         for i in range(num_products):
@@ -114,10 +115,8 @@ class HybridRecommendationSystem:
                     collaborative_similarity = normalized_collaborative_similarities[idx]
                     idx += 1
                     # Combine normalized collaborative similarity and content similarity using blend weights
-                    self.combined_similarity_matrix[i, j] = (
-                        self.blend_weights['collaborative'] * collaborative_similarity +
-                        self.blend_weights['content'] * content_similarity
-                    )
+                    self.combined_similarity_matrix[i, j] = (self.blend_weights['collaborative'] * collaborative_similarity +
+                                                             self.blend_weights['content'] * content_similarity)
 
     def get_top_n_similar_products(self, product_id, n=5):
         # Retrieve top-N similar products based on the combined similarity matrix
@@ -160,11 +159,9 @@ class HybridRecommendationSystem:
                     collaborative_similarity = 0  # Since hop is 1, there's no collaborative similarity involved
                     
                     # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
-                    score = (
-                        self.blend_weights['interaction'] * interaction_weight +
-                        self.blend_weights['content'] * content_similarity +
-                        self.blend_weights['collaborative'] * collaborative_similarity
-                    )
+                    score = (self.w1 * interaction_weight +
+                             self.w2 * content_similarity +
+                             self.w3 * collaborative_similarity)
                     recommendations[neighbor] = score
             else:
                 # Get second-hop neighbors (products connected to the user's first-hop products)
@@ -182,12 +179,11 @@ class HybridRecommendationSystem:
                                 collaborative_similarity = self.combined_similarity_matrix[product_index, product_index]
                                 
                                 # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
-                                score = (
-                                    self.blend_weights['interaction'] * interaction_weight +
-                                    self.blend_weights['content'] * content_similarity +
-                                    self.blend_weights['collaborative'] * collaborative_similarity
-                                )
+                                score = (self.w1 * interaction_weight +
+                                         self.w2 * content_similarity +
+                                         self.w3 * collaborative_similarity)
                                 recommendations[product] = recommendations.get(product, 0) + score
+                                #print(f"Product '{product}' added with score: {score}")  # Debugging: Print product and score
 
         # If exclude_purchased is True, filter out products the user has already purchased
         if exclude_purchased:
@@ -233,3 +229,4 @@ if __name__ == "__main__":
 
     # Print the formatted table using the imported function
     print_formatted_recommendations(user_recommendations_trimmed, recommender.products_df)
+

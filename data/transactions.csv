@@ -10,6 +10,11 @@ customer_id,customer_name,product_id,product_name,category_id,category_name,inte
 101,Alice Johnson,19,Under Armour Sports Tights,2,Clothing,purchased,1,29/09/2024 13:55
 101,Alice Johnson,3,Sony WH-1000XM4 Headphones,1,Electronics,added,1,29/09/2024 19:12
 
+
+1011,Alice Johnson,5,Dell XPS 13 Laptop,1,Electronics,clicked,1,25/09/2024 14:32
+1011,Alice Johnson,38,Dove Deep Moisture Body Wash,5,Beauty and Personal Care,added,1,25/09/2024 15:45
+1011,Alice Johnson,10,Apple iPad Pro 12.9,1,Electronics,purchased,2,25/09/2024 17:02
+
 102,John Smith,27,Breville Toaster Oven,3,Home Appliances,purchased,3,26/09/2024 9:18
 102,John Smith,9,Samsung QLED TV,1,Electronics,clicked,1,26/09/2024 10:25
 102,John Smith,35,Spalding NBA Official Basketball,4,Sports Equipment,added,2,26/09/2024 11:58
