@@ -292,7 +292,7 @@ if __name__ == "__main__":
     print_formatted_recommendations(similar_products[['category_name', 'product_id', 'score']].values.tolist(), recommender.products_df)
 
     # Example: Get recommendations for user 101 with two-hop traversal, limited to top 5, excluding already purchased products
-    customer_id = 1011
+    customer_id = 101
     print(f"Top 5 recommendations for user '{customer_id}' with two-hop traversal (excluding purchased):")
     user_recommendations = recommender.multi_hop_recommendation(customer_id, hop=2, top_n=10, exclude_purchased=True)
 

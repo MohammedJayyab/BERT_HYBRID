@@ -4,10 +4,24 @@ from transformers import BertTokenizer, AutoModel
 from sklearn.metrics.pairwise import cosine_similarity
 import networkx as nx
 import torch
+from datetime import datetime
+import time
+from torch.cuda.amp import autocast  # Mixed precision
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from sklearn.preprocessing import StandardScaler
+from scipy.sparse import lil_matrix  # For sparse matrix representation
+import csv
+
+
 
 # Import the print_formatted_recommendations function from pretty_table.py
 from pretty_table import print_formatted_recommendations
+from pretty_table import export_recommendations_as_json
+from pretty_table import save_recommendations_to_json
+from pretty_table import save_recommendations_to_csv
+
 
 class HybridRecommendationSystem:
     def __init__(self, product_file, transaction_file, interaction_weights=None, blend_weights=None):
@@ -24,7 +38,7 @@ class HybridRecommendationSystem:
         self.standard_scaler = StandardScaler()
 
         # Customizable interaction weights for user behavior (clicked, added, purchased)
-        self.interaction_weights = interaction_weights if interaction_weights else {'clicked': 1, 'added': 2, 'purchased': 3}
+        self.interaction_weights = interaction_weights if interaction_weights else {'clicked': 0, 'added': 0, 'purchased': 1}
         
         # Hyperparameters to blend collaborative and content-based features
         self.blend_weights = blend_weights if blend_weights else {'content': 0.5, 'collaborative': 0.5}
@@ -42,23 +56,8 @@ class HybridRecommendationSystem:
         print(self.products_df['document'].head())
 
 
-    def generate_bert_embeddings__OLD(self):
-        # Generate BERT embeddings for each product document
-        print("1/2:: Generating BERT embeddings for product documents...")
-        def get_bert_embedding(text):
-            inputs = self.tokenizer(text, return_tensors='pt', truncation=True, padding=True, max_length=512)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            return outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
-        print("2/2:: Generating BERT embeddings for product documents...")
-        
-        self.products_df['embedding'] = self.products_df['document'].apply(get_bert_embedding)
-        print("Apply embedding to product document......[ok]")
-        self.product_vectors = np.vstack(self.products_df['embedding'].values)
 
-        print("BERT embeddings generated successfully......[ok]")
-    
-    def generate_bert_embeddings(self, batch_size=16):
+    def generate_bert_embeddings(self, batch_size=32):
         # Generate BERT embeddings for product documents in batches
         print("Generating BERT embeddings for product documents...")
 
@@ -72,38 +71,39 @@ class HybridRecommendationSystem:
         embeddings = []
 
         # Move model to GPU if available
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(device)
+        
         if torch.cuda.is_available():
             print("Using GPU for BERT model.")
-            self.model.cuda()
         else:
             print("Using CPU for BERT model.")
 
+        # Pre-tokenize all documents to avoid tokenization overhead in each batch
+        print("Pre-tokenizing all documents...")
+        inputs = self.tokenizer(documents, return_tensors='pt', truncation=True, padding=True, max_length=512)
+
+        # Initialize tqdm progress bar for batch processing
+        progress_bar = tqdm(range(0, len(documents), batch_size), desc="Processing batches")
+
         # Process documents in batches to improve performance
-        for i in range(0, len(documents), batch_size):
-            batch = documents[i:i + batch_size]
+        for i in progress_bar:
+            # Create a batch of inputs by slicing each tensor (e.g., input_ids, attention_mask)
+            batch_inputs = {key: value[i:i + batch_size].to(device) for key, value in inputs.items()}
 
-            # Tokenize the batch and print debugging info
-            print(f"Processing batch {i // batch_size + 1}/{len(documents) // batch_size + 1}. Number of documents in this batch: {len(batch)}")
-            inputs = self.tokenizer(batch, return_tensors='pt', truncation=True, padding=True, max_length=512)
-
-            # Move inputs to GPU if available
-            if torch.cuda.is_available():
-                inputs = {key: value.cuda() for key, value in inputs.items()}
-
-            # Get embeddings
+            # Get embeddings without mixed precision as a test
             with torch.no_grad():
-                outputs = self.model(**inputs)
+                outputs = self.model(**batch_inputs)
 
-            # Get the mean of the last hidden state and move back to CPU for NumPy processing
+            # Get the mean of the last hidden state and keep on GPU for faster processing
             batch_embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
-            
+
             # Check if any embeddings are generated
             if batch_embeddings.size == 0:
                 print(f"Error: No embeddings generated for batch {i // batch_size + 1}.")
                 continue
 
             embeddings.append(batch_embeddings)
-            print(f"Processed batch {i // batch_size + 1} successfully.")
 
         # Combine all embeddings into a single array
         if len(embeddings) > 0:
@@ -111,9 +111,6 @@ class HybridRecommendationSystem:
             print("BERT embeddings generated successfully.")
         else:
             print("Error: No embeddings were generated for any document.")
-
-
-
 
     # def compute_similarity_matrix(self):
     #     # Compute product-to-product cosine similarity matrix
@@ -161,53 +158,38 @@ class HybridRecommendationSystem:
         self.similarity_matrix = self.min_max_scaler.fit_transform(self.similarity_matrix)
         print("Similarity matrix computed and normalized successfully.")
 
-
-
-
-    def construct_user_product_graph__old(self):
-        # Add product nodes to the graph
-        for _, row in self.products_df.iterrows():
-            self.graph.add_node(f"product_{row['product_id']}", type='product')
-
-        # Add user-product interactions to the graph
-        for _, row in self.transactions_df.iterrows():
-            user_node = f"user_{row['customer_id']}"
-            product_node = f"product_{row['product_id']}"
-            interaction_type = row['interaction_type'] #if pd.notna(row['interaction_type']) else 'clicked'  # Default to 'clicked' if NaN
-            quantity = row.get('quantity', 1)  # Default to 1 if quantity is not present
-            base_weight = self.interaction_weights.get(interaction_type, 1)
-            weight = base_weight * np.log(quantity + 1)  # Final weight is based on interaction type and quantity with logarithmic scaling
-
-            if user_node not in self.graph:
-                self.graph.add_node(user_node, type='user')
-            
-            # Add an edge with interaction type, weight, and quantity
-            self.graph.add_edge(user_node, product_node, weight=weight, interaction=interaction_type, quantity=quantity)
     def construct_user_product_graph(self):
-        # Add product nodes to the graph
-        print("construct user product graph.......................")
-        for _, row in self.products_df.iterrows():
-            self.graph.add_node(f"product_{row['product_id']}", type='product')
+        # Initialize sets to track added user and product nodes
+        user_nodes = set()
+        product_nodes = set()
+
+        # Add product nodes to the graph in batch
+        print("Processing product nodes...")
+        for _, row in tqdm(self.products_df.iterrows(), total=len(self.products_df), desc="Products"):
+            product_node = f"product_{row['product_id']}"
+            if product_node not in product_nodes:
+                self.graph.add_node(product_node, type='product')
+                product_nodes.add(product_node)
 
         # Add user-product interactions to the graph
-        for _, row in self.transactions_df.iterrows():
+        print("Processing user-product interactions...")
+        for _, row in tqdm(self.transactions_df.iterrows(), total=len(self.transactions_df), desc="Transactions"):
             user_node = f"user_{row['customer_id']}"
             product_node = f"product_{row['product_id']}"
-            interaction_type = row['interaction_type']# if pd.notna(row['interaction_type']) else 'clicked'  # Default to 'clicked' if NaN
+            interaction_type = row['interaction_type']
             quantity = row.get('quantity', 1)  # Default to 1 if quantity is not present
             base_weight = self.interaction_weights.get(interaction_type, 1)
             weight = base_weight * np.log(quantity + 1)  # Final weight is based on interaction type and quantity with logarithmic scaling
 
-            # Ensure that both user and product nodes are assigned the correct type
-            if user_node not in self.graph:
-                self.graph.add_node(user_node, type='user')  # Add user node with 'user' type
-            
-            if product_node not in self.graph:
-                self.graph.add_node(product_node, type='product')  # Add product node with 'product' type
-            
+            # Only add user node if it hasn't been added yet
+            if user_node not in user_nodes:
+                self.graph.add_node(user_node, type='user')
+                user_nodes.add(user_node)
+
             # Add an edge with interaction type, weight, and quantity
             self.graph.add_edge(user_node, product_node, weight=weight, interaction=interaction_type, quantity=quantity)
-        
+
+        print("User-product graph construction completed.")
 
     def normalize_edge_weights(self):
         # Normalize edge weights in the user-product graph to be between 0 and 1
@@ -220,35 +202,41 @@ class HybridRecommendationSystem:
             self.graph[u][v]['weight'] = normalized_weights[idx]
 
     def compute_combined_similarity(self):
-        # Combine collaborative similarity with content-based similarity
+        print("Computing combined similarity matrix...")
+
         num_products = len(self.products_df)
+        num_users = len(self.transactions_df['customer_id'].unique())
+
+        # Initialize the combined similarity matrix
         self.combined_similarity_matrix = np.zeros((num_products, num_products))
-        
-        collaborative_similarities = []
-        for i in range(num_products):
-            for j in range(num_products):
-                if i != j:
-                    product_i = f"product_{self.products_df.iloc[i]['product_id']}"
-                    product_j = f"product_{self.products_df.iloc[j]['product_id']}"
 
-                    common_users = len(set(self.graph.neighbors(product_i)) & set(self.graph.neighbors(product_j)))
-                    collaborative_similarity = common_users / (len(set(self.graph.neighbors(product_i))) * len(set(self.graph.neighbors(product_j))) + 1e-9)
-                    collaborative_similarities.append(collaborative_similarity)
+        # Step 1: Create the product-user adjacency matrix
+        product_to_index = {f"product_{row['product_id']}": idx for idx, row in self.products_df.iterrows()}
+        user_to_index = {f"user_{customer_id}": idx for idx, customer_id in enumerate(self.transactions_df['customer_id'].unique())}
 
-        # Normalize collaborative similarities using Z-score normalization
-        collaborative_similarities = np.array(collaborative_similarities).reshape(-1, 1)
-        normalized_collaborative_similarities = self.standard_scaler.fit_transform(collaborative_similarities).flatten()
-        
-        idx = 0
-        for i in range(num_products):
-            for j in range(num_products):
-                if i != j:
-                    content_similarity = self.similarity_matrix[i, j]
-                    collaborative_similarity = normalized_collaborative_similarities[idx]
-                    idx += 1
-                    # Combine normalized collaborative similarity and content similarity using blend weights
-                    self.combined_similarity_matrix[i, j] = (self.blend_weights['collaborative'] * collaborative_similarity +
-                                                             self.blend_weights['content'] * content_similarity)
+        # Create a sparse matrix for product-user interactions (users as rows, products as columns)
+        adjacency_matrix = lil_matrix((num_users, num_products))
+
+        # Fill the adjacency matrix with interactions
+        for _, row in tqdm(self.transactions_df.iterrows(), desc="Building Adjacency Matrix", total=len(self.transactions_df)):
+            user_idx = user_to_index[f"user_{row['customer_id']}"]
+            product_idx = product_to_index[f"product_{row['product_id']}"]
+            adjacency_matrix[user_idx, product_idx] = 1
+
+        # Convert to CSR format for efficient matrix multiplication
+        adjacency_matrix = adjacency_matrix.tocsr()
+
+        # Step 2: Use matrix multiplication to compute the common neighbors (collaborative similarity)
+        print("Computing collaborative similarities...")
+        product_interaction_matrix = adjacency_matrix.T @ adjacency_matrix  # Matrix multiplication
+
+        # The diagonal contains self-product interactions, set them to 0
+        product_interaction_matrix.setdiag(0)
+        print("Collaborative similarities computed successfully.")
+        # Step 3: Normalize collaborative similarities using Z-score normalization
+        #collaborative_similarities = product_interaction_matrix.toarray().reshape(-1, 1)
+        #normalized_collaborative_similarities = self.standard_scaler.fit_transform(collaborative_similarities).flatten()
+ 
 
     def get_top_n_similar_products(self, product_id, n=5):
         # Retrieve top-N similar products based on the combined similarity matrix
@@ -259,51 +247,102 @@ class HybridRecommendationSystem:
         # Create a DataFrame for the top N products with similarity scores
         similar_products = self.products_df.iloc[top_n_indices][['category_name', 'product_id', 'product_name']].copy()
         similar_products['score'] = product_similarities[top_n_indices]
+        similar_products['filter_type'] = 'collaborative' 
 
         return similar_products
-
-    def recommend_new_or_non_interacted_products(self, user_id, n=5):
+    def recommend_new_or_non_interacted_products(self, user_id, n=5, verbose=False):
         # Recommend new products that the user has not interacted with
         user_node = f"user_{user_id}"
         
+        # Check if the user node exists in the graph
         if user_node not in self.graph:
             print(f"User '{user_id}' not found in the graph.")
             return []
 
+        # Step 1: Precompute product lookup and product indices for faster access
+        product_lookup = self.products_df.set_index('product_id').to_dict(orient='index')
+        
+        # Precompute indices of all products
+        product_index_map = {p_id: idx for idx, p_id in enumerate(self.products_df['product_id'])}
+
+        # Get the products the user has interacted with
         interacted_products = {
             neighbor for neighbor in self.graph.neighbors(user_node)
             if self.graph.nodes[neighbor]['type'] == 'product'
         }
-        
-        all_products = {f"product_{row['product_id']}" for _, row in self.products_df.iterrows()}
-        non_interacted_products = all_products - interacted_products
+
+        # Create sets of product IDs and names that the user has interacted with
+        interacted_product_ids = {p.split('_')[1] for p in interacted_products}
+        interacted_product_names = {product_lookup[p_id]['product_name'] for p_id in interacted_product_ids if p_id in product_lookup}
+
+        # Step 2: Filter out non-interacted products early to reduce later computations
+        all_product_ids = set(self.products_df['product_id'].tolist())
+        non_interacted_product_ids = all_product_ids - interacted_product_ids
+
+        # Step 3: Use set operations to filter out duplicates (case-insensitive)
+        seen_product_names = set()
+        filtered_non_interacted_products = []
+
+        for product_id in non_interacted_product_ids:
+            if product_id in product_lookup:
+                product_name = product_lookup[product_id]['product_name']
+                if product_name not in seen_product_names:
+                    filtered_non_interacted_products.append(product_id)
+                    seen_product_names.add(product_name)
 
         recommendations = []
-        
-        # Calculate the similarity only with products interacted by the user
-        interacted_indices = [self.products_df[self.products_df['product_id'] == p.split('_')[1]].index[0] for p in interacted_products]
+        skipped_products_count = 0  # Track how many products were skipped
 
-        for product in non_interacted_products:
-            product_index = self.products_df[self.products_df['product_id'] == product.split('_')[1]].index[0]
-            
-            # Calculate similarity only with interacted products and take the maximum
-            if interacted_indices:
+        # Step 4: Precompute interacted product indices to avoid repeated lookups
+        interacted_indices = [
+            product_index_map[p_id]
+            for p_id in interacted_product_ids if p_id in product_index_map
+        ]
+
+        if not interacted_indices:
+            print("No interacted products found for this user.")
+            return []
+
+        # Step 5: Vectorize similarity calculation using numpy for faster computation
+        for product_id in filtered_non_interacted_products:
+            if product_id in product_lookup:
+                product_info = product_lookup[product_id]
+                product_name = product_info['product_name']
+
+                # Skip if the product_id or product_name is in the interacted products set
+                if product_id in interacted_product_ids or product_name in interacted_product_names:
+                    if verbose:
+                        print(f"Skipping already interacted product '{product_name}' with ID '{product_id}'.")
+                    continue  # Skip this product if it was already interacted with
+
+                product_index = product_index_map.get(product_id)
+                if product_index is None:
+                    skipped_products_count += 1
+                    if verbose:
+                        print(f"Product with ID '{product_id}' not found in product index map.")
+                    continue
+
+                # Calculate similarity in bulk with vectorized operation
                 content_similarity = np.max(self.similarity_matrix[product_index, interacted_indices])
-            else:
-                content_similarity = 0
 
-            # Only content similarity is used as there's no interaction or collaborative data for new products
-            score = 1 * content_similarity  
-            
-            recommendations.append((self.products_df.iloc[product_index]['category_name'],
-                                    self.products_df.iloc[product_index]['product_id'],
-                                    self.products_df.iloc[product_index]['product_name'],
-                                    score))
+                # Only content similarity is used as there's no interaction or collaborative data for new products
+                score = content_similarity
+                
+                recommendations.append((product_info['category_name'],
+                                        product_id,
+                                        product_name,
+                                        score,
+                                        'content-based'))
 
         # Sort recommendations by score in descending order and limit to top N
         sorted_recommendations = sorted(recommendations, key=lambda x: x[3], reverse=True)[:n]
+        
+        # Provide summary if products were skipped
+        if skipped_products_count > 0:
+            print(f"Skipped {skipped_products_count} products that were not found in products_df.")
 
         return sorted_recommendations
+
 
     def multi_hop_recommendation___old(self, user_id, hop=2, top_n=5, exclude_purchased=False):
         # Generate multi-hop recommendations
@@ -431,7 +470,7 @@ class HybridRecommendationSystem:
                                 product_row = self.products_df[self.products_df['product_id'] == product_id]
                                 
                                 if product_row.empty:
-                                    print(f"Product with ID '{product_id}' not found in products_df.")
+                                    print(f"Product with ID '{product_id}' not found in products_df...")
                                     continue
 
                                 product_index = product_row.index[0]
@@ -455,7 +494,8 @@ class HybridRecommendationSystem:
         return [(self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['category_name'].values[0],
                 self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['product_id'].values[0],
                 self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['product_name'].values[0],
-                item[1]) for item in sorted_recommendations]
+                item[1],
+                'collaborative') for item in sorted_recommendations]
 
     def blend_user_and_new_recommendations(self, user_recommendations, new_recommendations, user_ratio=0.6, new_ratio=0.4):
         # Determine the number of items to take from each list
@@ -492,50 +532,90 @@ class HybridRecommendationSystem:
         self.normalize_edge_weights()
         self.compute_combined_similarity()
 
-# Example Usage
+
+
+def read_customer_ids(file_path):
+    customer_ids = []
+    
+    try:
+        with open(file_path, mode='r', newline='') as file:
+            csv_reader = csv.reader(file)
+            # Skip the header
+            next(csv_reader)
+            # Read each row and append the first column (customer ID)
+            for row in csv_reader:
+                if row:  # Ensure row is not empty
+                    customer_ids.append(row[0].strip('"'))  # Strip the quotes from the customer ID if present
+    
+    except FileNotFoundError:
+        print(f"Error: The file at {file_path} was not found.")
+    except IOError:
+        print(f"Error: An error occurred while reading the file at {file_path}.")
+    
+    return customer_ids
+
+def print_time(prefix):
+    # Get the current date and time
+    current_time = datetime.now()
+    
+    formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{prefix} {formatted_time}")
+
+
 if __name__ == "__main__":
+    # Record the start time
+    print_time("Starting at")
+    start_time = time.time() 
+    
     recommender = HybridRecommendationSystem('data/ml_products.csv', 'data/ml_transactions.csv')
     recommender.run_recommendation_pipeline()
 
-    # Example: Get top 5 similar products for product with ID
-    product_id = "5010436603022"
-    print(f"Top 5 similar products for product '{product_id}':")
-    similar_products = recommender.get_top_n_similar_products(product_id, n=5)
-    # Print the formatted table using the imported function
-    print_formatted_recommendations(similar_products[['category_name', 'product_id', 'score']].values.tolist(), recommender.products_df)
+    # Read customer IDs from the input file
+    customer_ids = read_customer_ids('data/ml_customers.csv')
 
-    # Example: Get recommendations for user 101 with two-hop traversal, limited to top 5, excluding already purchased products
-    customer_id = "9568245350259500"
-    print(f"Top 5 recommendations for user '{customer_id}' with two-hop traversal (excluding purchased):")
-    user_recommendations = recommender.multi_hop_recommendation(customer_id, hop=2, top_n=10, exclude_purchased=True)
+    all_customer_recommendations = {}
 
-    # Extract only the relevant three values: category_name, product_id, and score for `print_formatted_recommendations` function
-    user_recommendations_trimmed = [(category_name, product_id, score) for category_name, product_id, _, score in user_recommendations]
+    for customer_id in tqdm(customer_ids, desc="Processing customers"):
+        #print(f"Top 5 recommendations for user '{customer_id}' with two-hop traversal (excluding purchased):")
+        user_recommendations = recommender.multi_hop_recommendation(customer_id, hop=2, top_n=10, exclude_purchased=True)
 
-    # Print the formatted table using the imported function
-    print_formatted_recommendations(user_recommendations_trimmed, recommender.products_df)
+        user_recommendations_trimmed = [(category_name, product_id, score, filter_type) for category_name, product_id, _, score, filter_type in user_recommendations]
 
-    # Example: Get recommendations for new or non-interacted products for user 101
-    print(f"Top 5 new or non-interacted product recommendations for user '{customer_id}':")
-    new_recommendations = recommender.recommend_new_or_non_interacted_products(customer_id, n=10)
+        #print_formatted_recommendations(user_recommendations_trimmed, recommender.products_df)
 
-    # Extract only the relevant three values: category_name, product_id, and score for `print_formatted_recommendations` function
-    new_recommendations_trimmed = [(category_name, product_id, score) for category_name, product_id, _, score in new_recommendations]
+        #print(f"Top 5 new or non-interacted product recommendations for user '{customer_id}':")
+        new_recommendations = recommender.recommend_new_or_non_interacted_products(customer_id, n=10)
 
-    # Print the formatted table using the imported function
-    print_formatted_recommendations(new_recommendations_trimmed, recommender.products_df)
+        new_recommendations_trimmed = [(category_name, product_id, score, filter_type) for category_name, product_id, _, score, filter_type in new_recommendations]
 
-    # Example: Blend user recommendations with new recommendations
-    print("***************************************************************")
-    print(f"Top 10 blended recommendations for user '{customer_id}':")
-    print("***************************************************************")
-    # Assuming you have user_recommendations_trimmed and new_recommendations_trimmed defined
-    blended_recommendations = recommender.blend_user_and_new_recommendations(
-        user_recommendations_trimmed,
-        new_recommendations_trimmed,
-        user_ratio=0.5,   # 50% from user recommendations
-        new_ratio=0.5,    # 50% from new recommendations        
-    )
+        #print_formatted_recommendations(new_recommendations_trimmed, recommender.products_df)
 
-    # Print the blended recommendations using print_formatted_recommendations
-    print_formatted_recommendations(blended_recommendations, recommender.products_df)
+        # Blend user and new recommendations
+        blended_recommendations = recommender.blend_user_and_new_recommendations(
+            user_recommendations_trimmed,
+            new_recommendations_trimmed,
+            user_ratio=0.5,   # 50% from user recommendations
+            new_ratio=0.5     # 50% from new recommendations        
+        )
+        #print(f"=> Blended recommendations for user '{customer_id}':\r\n")
+
+        #print_formatted_recommendations(blended_recommendations, recommender.products_df)
+
+        # Export recommendations as JSON for this customer
+        customer_recommendations_json = export_recommendations_as_json(blended_recommendations, recommender.products_df, customer_id)
+        all_customer_recommendations.update(customer_recommendations_json)
+
+    # Save all customer recommendations to a JSON file
+    save_recommendations_to_json('output/customer_recommendations.json', all_customer_recommendations)
+    
+     # Record the end time
+    end_time = time.time()
+    print_time("Ending at")
+       # Calculate the total time taken
+    total_time = end_time - start_time
+    minutes, seconds = divmod(total_time, 60)
+
+    # Print the total time taken
+    print(f"Total time taken: {int(minutes)} minutes and {int(seconds)} seconds.")
+    #save_recommendations_to_csv('output/customer_recommendations.csv', blended_recommendations)
+

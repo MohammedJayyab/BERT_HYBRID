@@ -7,4 +7,10 @@ networkx==3.1
 matplotlib
 pyvis
 Jinja2
+tabulate 
+colorama
+bidict
+arabic-reshaper
+python-bidi
 # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# pip install --upgrade certifi
