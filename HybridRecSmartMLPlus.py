@@ -480,7 +480,7 @@ class HybridRecommendationSystem:
         non_used_categories = interacted_categories - recommended_categories        
 
         if not non_used_categories:
-            print(f"No unused categories for user '{user_id}'.")
+            #print(f"No unused categories for user '{user_id}'.")
             return []
 
         # Step 6: Get 1 random product per non-used category
@@ -627,9 +627,9 @@ if __name__ == "__main__":
             content_ratio=0.3,     # 30% from new recommendations        
             category_ratio=0.4  # 40% from category recommendations
         )
-        print(f"=> Blended recommendations for user '{customer_id}':\r\n")
+        #print(f"=> Blended recommendations for user '{customer_id}':\r\n")
 
-        print_formatted_recommendations(blended_recommendations, recommender.products_df)
+        #print_formatted_recommendations(blended_recommendations, recommender.products_df)
 
         # Export recommendations as JSON for this customer
         customer_recommendations_json = export_recommendations_as_json(blended_recommendations, recommender.products_df, customer_id)

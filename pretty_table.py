@@ -21,7 +21,7 @@ def fix_arabic_text(text):
         return bidi_text[:50] + '...'  # Truncate the text and add "..." if cut
     return bidi_text
 
-def print_formatted_recommendations(recommendations, products_df, output_file="output.txt"):
+def print_formatted_recommendations(recommendations, products_df, output_file="output/output.txt"):
     # Convert the list of recommendations to a DataFrame
     recommendation_data = []
 
