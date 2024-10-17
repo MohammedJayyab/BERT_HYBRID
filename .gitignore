@@ -4,12 +4,13 @@ lib/*
 lib
 .vscode
 .vscode/*
-__pycache__
-__pycache__/*
+
 data/*
 output/*
 output
 model/*
 model
-out/*
-out
+__pycache__
+__pycache__/*
+
+
