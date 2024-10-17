@@ -1,0 +1,2 @@
+Welcome to the SMART REC PLUS!
+This is your intelligent E-Commerce Recommendation System.

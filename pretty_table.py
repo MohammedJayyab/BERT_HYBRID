@@ -25,13 +25,13 @@ def print_formatted_recommendations(recommendations, products_df, output_file="o
     # Convert the list of recommendations to a DataFrame
     recommendation_data = []
 
-    for category_name, product_id, score, filter_type in recommendations:
+    for category_name, product_id,  score, filter_type in recommendations:  # Now expecting 5 elements
         product_info = products_df[products_df['product_id'] == product_id].iloc[0]
         recommendation_data.append({
             'category_id': product_info['category_id'],
             'category_name': fix_arabic_text(category_name),  # Fix Arabic text
             'product_id': product_id,
-            'product_name_ar':fix_arabic_text( product_info['product_name_ar']),            
+            'product_name_ar': fix_arabic_text(product_info['product_name_ar']),            
             'product_name': fix_arabic_text(product_info['product_name']),  # Fix Arabic text
             'score': f"{score:.4f}",
             'filter_type': filter_type
@@ -41,7 +41,12 @@ def print_formatted_recommendations(recommendations, products_df, output_file="o
     recommendations_df = pd.DataFrame(recommendation_data)
 
     # Sort by score (if not already sorted)
-    recommendations_df = recommendations_df.sort_values(by='score', ascending=False)
+     # Ensure that the 'score' column exists and sort the DataFrame
+    if 'score' in recommendations_df.columns:
+        recommendations_df = recommendations_df.sort_values(by='score', ascending=False)
+    else:
+        print("Error: 'score' column not found in recommendations DataFrame.")
+
 
     # Define color based on filter_type
     def get_colored_row(row):

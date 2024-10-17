@@ -13,7 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 from sklearn.preprocessing import StandardScaler
 from scipy.sparse import lil_matrix  # For sparse matrix representation
 import csv
-
+import os
+import pickle
 
 
 # Import the print_formatted_recommendations function from pretty_table.py
@@ -57,7 +58,7 @@ class HybridRecommendationSystem:
 
 
 
-    def generate_bert_embeddings(self, batch_size=32):
+    def generate_bert_embeddings__old(self, batch_size=32):
         # Generate BERT embeddings for product documents in batches
         print("Generating BERT embeddings for product documents...")
 
@@ -111,6 +112,40 @@ class HybridRecommendationSystem:
             print("BERT embeddings generated successfully.")
         else:
             print("Error: No embeddings were generated for any document.")
+
+
+    def generate_bert_embeddings(self, batch_size=32, embeddings_file='model/bert_embeddings.pkl'):
+        if os.path.exists(embeddings_file):
+            print("Loading BERT embeddings from file...")
+            with open(embeddings_file, 'rb') as f:
+                self.product_vectors = pickle.load(f)
+            print("BERT embeddings loaded successfully.")
+            return
+        
+        print("Generating BERT embeddings for product documents...")
+        
+        documents = self.products_df['document'].tolist()
+        embeddings = []
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(device)
+        inputs = self.tokenizer(documents, return_tensors='pt', truncation=True, padding=True, max_length=512)
+
+        progress_bar = tqdm(range(0, len(documents), batch_size), desc="Processing batches")
+        for i in progress_bar:
+            batch_inputs = {key: value[i:i + batch_size].to(device) for key, value in inputs.items()}
+            with torch.no_grad():
+                outputs = self.model(**batch_inputs)
+            batch_embeddings = outputs.last_hidden_state.mean(dim=1).cpu().numpy()
+            embeddings.append(batch_embeddings)
+
+        if len(embeddings) > 0:
+            self.product_vectors = np.vstack(embeddings)
+            print("BERT embeddings generated successfully.")
+            with open(embeddings_file, 'wb') as f:
+                pickle.dump(self.product_vectors, f)
+            print("BERT embeddings saved to model folder....")
+        else:
+            print("Error: No embeddings were generated.")
 
     # def compute_similarity_matrix(self):
     #     # Compute product-to-product cosine similarity matrix
@@ -236,9 +271,95 @@ class HybridRecommendationSystem:
         # Step 3: Normalize collaborative similarities using Z-score normalization
         #collaborative_similarities = product_interaction_matrix.toarray().reshape(-1, 1)
         #normalized_collaborative_similarities = self.standard_scaler.fit_transform(collaborative_similarities).flatten()
- 
+    
 
-    def recommend_new_or_non_interacted_products(self, user_id, n=5, verbose=False):
+    def multi_hop_recommendation(self, user_id, hop=2, top_n=5, exclude_purchased=False):
+        # Generate multi-hop recommendations
+        user_node = f"user_{user_id}"
+        
+        # Check if the user node exists in the graph
+        if user_node not in self.graph:
+            print(f"User '{user_id}' not found in the graph.")
+            return []
+
+        recommendations = {}
+
+        # Get products the user has "purchased"
+        purchased_products = {
+            neighbor for neighbor in self.graph.neighbors(user_node)
+            if self.graph[user_node][neighbor]['interaction'] == 'purchased'
+        }
+
+        # Get the direct neighbors of the user (first-hop)
+        neighbors = set(self.graph.neighbors(user_node))
+
+        for neighbor in neighbors:
+            if hop == 1:
+                if self.graph.nodes[neighbor]['type'] == 'product':
+                    interaction_weight = self.graph[user_node][neighbor]['weight']
+                    product_id = neighbor.split('_')[1]
+                    
+                    # Check if the product_id exists in self.products_df
+                    product_row = self.products_df[self.products_df['product_id'] == product_id]
+                    
+                    if product_row.empty:
+                        print(f"Product with ID '{product_id}' not found in products_df.")
+                        continue
+                    
+                    product_index = product_row.index[0]
+                    content_similarity = self.similarity_matrix[product_index, product_index]
+                    collaborative_similarity = 0  # Since hop is 1, there's no collaborative similarity involved
+                    
+                    # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
+                    score = (self.w1 * interaction_weight +
+                            self.w2 * content_similarity +
+                            self.w3 * collaborative_similarity)
+                    recommendations[neighbor] = score
+            else:
+                # Get second-hop neighbors (products connected to the user's first-hop products)
+                second_hop_neighbors = set(self.graph.neighbors(neighbor))
+                
+                for second_neighbor in second_hop_neighbors:
+                    if self.graph.nodes[second_neighbor]['type'] == 'user' and second_neighbor != user_node:
+                        # Get products connected to this second-hop user
+                        third_hop_products = set(self.graph.neighbors(second_neighbor))
+                        for product in third_hop_products:
+                            if self.graph.nodes[product]['type'] == 'product' and product not in neighbors:
+                                interaction_weight = self.graph[second_neighbor][product]['weight']
+                                product_id = product.split('_')[1]
+
+                                # Check if the product_id exists in self.products_df
+                                product_row = self.products_df[self.products_df['product_id'] == product_id]
+                                
+                                if product_row.empty:
+                                    print(f"Product with ID '{product_id}' not found in products_df...")
+                                    continue
+
+                                product_index = product_row.index[0]
+                                content_similarity = self.similarity_matrix[product_index, product_index]
+                                collaborative_similarity = self.combined_similarity_matrix[product_index, product_index]
+                                
+                                # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
+                                score = (self.w1 * interaction_weight +
+                                        self.w2 * content_similarity +
+                                        self.w3 * collaborative_similarity)
+                                recommendations[product] = recommendations.get(product, 0) + score
+
+        # If exclude_purchased is True, filter out products the user has already purchased
+        if exclude_purchased:
+            recommendations = {prod: score for prod, score in recommendations.items() if prod not in purchased_products}
+
+        # Sort recommendations by score in descending order and limit to top N
+        sorted_recommendations = sorted(recommendations.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+        # Extract category_name, product_id, product_name, and score for each recommended product
+        return [(self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['category_name'].values[0],
+                self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['product_id'].values[0],
+                self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['product_name'].values[0],
+                item[1],
+                'collaborative') for item in sorted_recommendations]
+
+    def recommend_content_based_products(self, user_id, n=5, verbose=False):
         # Recommend new products that the user has not interacted with
         user_node = f"user_{user_id}"
         
@@ -329,117 +450,101 @@ class HybridRecommendationSystem:
         if skipped_products_count > 0:
             print(f"Skipped {skipped_products_count} products that were not found in products_df.")
 
+        # print content-based recommendations headers
         return sorted_recommendations
-
-
-    def multi_hop_recommendation(self, user_id, hop=2, top_n=5, exclude_purchased=False):
-        # Generate multi-hop recommendations
+    
+    def recommend_category_based_products(self, user_id, recommendations, n=3):
+        # Get the user node
         user_node = f"user_{user_id}"
-        
+
         # Check if the user node exists in the graph
         if user_node not in self.graph:
             print(f"User '{user_id}' not found in the graph.")
             return []
 
-        recommendations = {}
+        # Step 1: Precompute product lookup
+        product_lookup = self.products_df.set_index('product_id').to_dict(orient='index')
 
-        # Get products the user has "purchased"
-        purchased_products = {
-            neighbor for neighbor in self.graph.neighbors(user_node)
-            if self.graph[user_node][neighbor]['interaction'] == 'purchased'
-        }
+        # Step 2: Get products the user has interacted with from transactions_df
+        user_transactions = self.transactions_df[self.transactions_df['customer_id'] == user_id]
+        interacted_product_ids = set(user_transactions['product_id'])
 
-        # Get the direct neighbors of the user (first-hop)
-        neighbors = set(self.graph.neighbors(user_node))
+        # Step 3: Get all categories that the user has interacted with
+        interacted_categories = set(self.products_df[self.products_df['product_id'].isin(interacted_product_ids)]['category_name'])
 
-        for neighbor in neighbors:
-            if hop == 1:
-                if self.graph.nodes[neighbor]['type'] == 'product':
-                    interaction_weight = self.graph[user_node][neighbor]['weight']
-                    product_id = neighbor.split('_')[1]
-                    
-                    # Check if the product_id exists in self.products_df
-                    product_row = self.products_df[self.products_df['product_id'] == product_id]
-                    
-                    if product_row.empty:
-                        print(f"Product with ID '{product_id}' not found in products_df.")
-                        continue
-                    
-                    product_index = product_row.index[0]
-                    content_similarity = self.similarity_matrix[product_index, product_index]
-                    collaborative_similarity = 0  # Since hop is 1, there's no collaborative similarity involved
-                    
-                    # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
-                    score = (self.w1 * interaction_weight +
-                            self.w2 * content_similarity +
-                            self.w3 * collaborative_similarity)
-                    recommendations[neighbor] = score
-            else:
-                # Get second-hop neighbors (products connected to the user's first-hop products)
-                second_hop_neighbors = set(self.graph.neighbors(neighbor))
-                
-                for second_neighbor in second_hop_neighbors:
-                    if self.graph.nodes[second_neighbor]['type'] == 'user' and second_neighbor != user_node:
-                        # Get products connected to this second-hop user
-                        third_hop_products = set(self.graph.neighbors(second_neighbor))
-                        for product in third_hop_products:
-                            if self.graph.nodes[product]['type'] == 'product' and product not in neighbors:
-                                interaction_weight = self.graph[second_neighbor][product]['weight']
-                                product_id = product.split('_')[1]
+        # Step 4: Get categories already present in the current recommendations
+        recommended_categories = {rec[0] for rec in recommendations}  # categories from content-based recommendations
 
-                                # Check if the product_id exists in self.products_df
-                                product_row = self.products_df[self.products_df['product_id'] == product_id]
-                                
-                                if product_row.empty:
-                                    print(f"Product with ID '{product_id}' not found in products_df...")
-                                    continue
+        # Step 5: Find all categories in the product dataset and exclude those already recommended or interacted with
+      
+        non_used_categories = interacted_categories - recommended_categories        
 
-                                product_index = product_row.index[0]
-                                content_similarity = self.similarity_matrix[product_index, product_index]
-                                collaborative_similarity = self.combined_similarity_matrix[product_index, product_index]
-                                
-                                # Final scoring function incorporating interaction weight, content similarity, and collaborative similarity
-                                score = (self.w1 * interaction_weight +
-                                        self.w2 * content_similarity +
-                                        self.w3 * collaborative_similarity)
-                                recommendations[product] = recommendations.get(product, 0) + score
+        if not non_used_categories:
+            print(f"No unused categories for user '{user_id}'.")
+            return []
 
-        # If exclude_purchased is True, filter out products the user has already purchased
-        if exclude_purchased:
-            recommendations = {prod: score for prod, score in recommendations.items() if prod not in purchased_products}
+        # Step 6: Get 1 random product per non-used category
+        category_recommendations = []
 
-        # Sort recommendations by score in descending order and limit to top N
-        sorted_recommendations = sorted(recommendations.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        for category in non_used_categories:
+            # Filter products by the current category
+            products_in_category = self.products_df[self.products_df['category_name'] == category]            
+            
+            # If there are products in this category, randomly sample one
+            if not products_in_category.empty:
+                random_product = products_in_category.sample(n=1, random_state=42).iloc[0]
+                # Add the random product to the recommendations
+                category_recommendations.append((
+                    random_product['category_name'],
+                    random_product['product_id'],
+                    random_product['product_name'],
+                    1.0,                    # Fixed score for category-based recommendations
+                    'category-based'         # Label for category-based filtering
+                ))
 
-        # Extract category_name, product_id, product_name, and score for each recommended product
-        return [(self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['category_name'].values[0],
-                self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['product_id'].values[0],
-                self.products_df[self.products_df['product_id'] == item[0].split('_')[1]]['product_name'].values[0],
-                item[1],
-                'collaborative') for item in sorted_recommendations]
+        # Sort category recommendations by score descending and then by category_name ascending
+        #category_recommendations= sorted(recommendations, key=lambda x: x[3], reverse=True)[:n]
+        category_recommendations.sort(key=lambda x: (-x[3], x[0])[:n])  # Score first, then category
+        # print category_recommendations all rows
+        
+        return category_recommendations                                
+    def blend_user_and_content_and_category_recommendations(self, user_recommendations, content_recommendations, category_recommendation, total_n=10, user_ratio=0.3, content_ratio=0.3, category_ratio=0.4):
+        # Step 1: Calculate the number of recommendations based on the given ratios
+        num_user_recommendations = int(round(total_n * user_ratio))
+        num_content_recommendations = int(round(total_n * content_ratio))
+        num_category_recommendations = int(round(total_n * category_ratio))
 
-    def blend_user_and_new_recommendations(self, user_recommendations, new_recommendations, user_ratio=0.6, new_ratio=0.4):
-        # Determine the number of items to take from each list
-        num_user_recommendations = int(len(user_recommendations) * user_ratio)
-        num_new_recommendations = int(len(new_recommendations) * new_ratio)
+        # Step 2: Ensure the total number of recommendations equals 'total_n'
+        total_recommendations = num_user_recommendations + num_content_recommendations + num_category_recommendations
+        
+        # Adjust if needed (e.g., if rounding caused the sum to not equal 'total_n')
+        if total_recommendations > total_n:
+            excess = total_recommendations - total_n
+            num_category_recommendations -= excess
+        elif total_recommendations < total_n:
+            deficit = total_n - total_recommendations
+            num_category_recommendations += deficit  # Add the deficit to the category recommendations
 
-        # Limit the user and new recommendations to the calculated sizes
+        # Step 3: Trim the lists based on calculated sizes
         user_recommendations_trimmed = user_recommendations[:num_user_recommendations]
 
         # Get product IDs that are already in the user recommendations to prevent duplication
         user_recommendation_ids = {recommendation[1] for recommendation in user_recommendations_trimmed}
 
-        # Filter new recommendations to exclude products that are already in user recommendations
-        new_recommendations_filtered = [
-            recommendation for recommendation in new_recommendations
+        # Filter content recommendations to exclude products that are already in user recommendations
+        content_recommendations_filtered = [
+            recommendation for recommendation in content_recommendations
             if recommendation[1] not in user_recommendation_ids
         ]
 
-        # Limit to the required number of new recommendations
-        new_recommendations_trimmed = new_recommendations_filtered[:num_new_recommendations]
+        # Limit to the required number of content recommendations
+        content_recommendations_trimmed = content_recommendations_filtered[:num_content_recommendations]
 
-        # Concatenate and sort by score
-        blended_recommendations = user_recommendations_trimmed + new_recommendations_trimmed
+        # Limit the category recommendations to the calculated size
+        category_recommendation_trimmed = category_recommendation[:num_category_recommendations]
+
+        # Step 4: Concatenate and sort by product_name (assuming product_name is at index 2)
+        blended_recommendations = user_recommendations_trimmed + content_recommendations_trimmed + category_recommendation_trimmed
         blended_recommendations = sorted(blended_recommendations, key=lambda x: x[2], reverse=True)
 
         return blended_recommendations
@@ -498,25 +603,29 @@ if __name__ == "__main__":
 
     for customer_id in tqdm(customer_ids, desc="Processing customers"):
         #print(f"Top 5 recommendations for user '{customer_id}' with two-hop traversal (excluding purchased):")
-        user_recommendations = recommender.multi_hop_recommendation(customer_id, hop=2, top_n=10, exclude_purchased=True)
-
+        user_recommendations = recommender.multi_hop_recommendation(customer_id, hop=2, top_n=5, exclude_purchased=True)
         user_recommendations_trimmed = [(category_name, product_id, score, filter_type) for category_name, product_id, _, score, filter_type in user_recommendations]
 
         #print_formatted_recommendations(user_recommendations_trimmed, recommender.products_df)
 
         #print(f"Top 5 new or non-interacted product recommendations for user '{customer_id}':")
-        new_recommendations = recommender.recommend_new_or_non_interacted_products(customer_id, n=10)
+        content_recommendations = recommender.recommend_content_based_products(customer_id, n=5)
+        content_recommendations_trimmed = [(category_name, product_id, score, filter_type) for category_name, product_id, _, score, filter_type in content_recommendations]
 
-        new_recommendations_trimmed = [(category_name, product_id, score, filter_type) for category_name, product_id, _, score, filter_type in new_recommendations]
+        category_recommendation = recommender.recommend_category_based_products(customer_id, user_recommendations_trimmed + content_recommendations, n=5)                
+        category_recommendations_trimmed = [(category_name, product_id, score, filter_type) for category_name, product_id, _, score, filter_type in category_recommendation]        
 
         #print_formatted_recommendations(new_recommendations_trimmed, recommender.products_df)
 
         # Blend user and new recommendations
-        blended_recommendations = recommender.blend_user_and_new_recommendations(
+        blended_recommendations = recommender.blend_user_and_content_and_category_recommendations(
             user_recommendations_trimmed,
-            new_recommendations_trimmed,
-            user_ratio=0.5,   # 50% from user recommendations
-            new_ratio=0.5     # 50% from new recommendations        
+            content_recommendations_trimmed,
+            category_recommendations_trimmed,
+            total_n=10,  # Total number of recommendations
+            user_ratio=0.3,   # 30% from user recommendations
+            content_ratio=0.3,     # 30% from new recommendations        
+            category_ratio=0.4  # 40% from category recommendations
         )
         print(f"=> Blended recommendations for user '{customer_id}':\r\n")
 
